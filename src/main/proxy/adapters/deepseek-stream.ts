@@ -201,7 +201,11 @@ export class DeepSeekStreamHandler {
       const hasToolCalls = outputChunks.some(chunk => 
         chunk.choices?.[0]?.delta?.tool_calls
       )
-      if (hasToolCalls) return
+      // For content path, streamToolHandler is the single output path.                                                                                                                                         
+      // Returning here avoids duplicate writes and prevents leaking partially buffered tool markup.                                                                                                            
+      if (hasToolCalls || outputChunks.length > 0 || !shouldFlush || this.toolCallState.hasEmittedToolCall) {                                                                                                   
+          return                                                                                                                                                                                                
+      }           
     }
 
     const delta: { role?: string; content?: string; reasoning_content?: string } = {}

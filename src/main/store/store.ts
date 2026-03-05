@@ -4,9 +4,10 @@
  * Uses Electron's safeStorage API for sensitive data encryption
  */
 
-import { app, safeStorage, BrowserWindow } from 'electron'
+import { safeStorage, BrowserWindow } from 'electron'
 import { homedir } from 'os'
 import { join } from 'path'
+import { existsSync, renameSync, unlinkSync } from 'fs'
 import {
   StoreSchema,
   AppConfig,
@@ -63,12 +64,16 @@ class StoreManager {
 
     const storagePath = this.getStoragePath()
 
-    this.store = new Store({
-      name: 'data',
-      cwd: storagePath,
-      defaults: this.getDefaultData(),
-      encryptionKey: this.getEncryptionKey(),
-    })
+    this.store = this.createStore(storagePath)
+
+    try {
+      // Force a read to eagerly detect decryption/parse failures.
+      this.store.get('config')
+    } catch (error) {
+      console.error('[Store] Failed to load persisted data, rebuilding store:', error)
+      this.backupAndResetCorruptedStore(storagePath)
+      this.store = this.createStore(storagePath)
+    }
 
     await this.initializeDefaultProviders()
     this.isInitialized = true
@@ -87,16 +92,37 @@ class StoreManager {
    * Uses Electron's safeStorage API to generate encryption key
    */
   private getEncryptionKey(): string | undefined {
-    try {
-      if (safeStorage.isEncryptionAvailable()) {
-        const key = 'chat2api-encryption-key'
-        const encryptedKey = safeStorage.encryptString(key)
-        return encryptedKey.toString('base64')
-      }
-    } catch (error) {
-      console.warn('Encryption unavailable, using unencrypted storage:', error)
+    // Must be stable across restarts; otherwise electron-store cannot decrypt old data.
+    return 'chat2api-store-encryption-key-v1'
+  }
+
+  private createStore(storagePath: string): StoreType {
+    return new Store({
+      name: 'data',
+      cwd: storagePath,
+      defaults: this.getDefaultData(),
+      encryptionKey: this.getEncryptionKey(),
+    })
+  }
+
+  private backupAndResetCorruptedStore(storagePath: string): void {
+    const dataFile = join(storagePath, 'data.json')
+    if (!existsSync(dataFile)) {
+      return
     }
-    return undefined
+
+    const backupFile = join(storagePath, `data.corrupted.${Date.now()}.json`)
+    try {
+      renameSync(dataFile, backupFile)
+      console.warn(`[Store] Corrupted store moved to: ${backupFile}`)
+    } catch (renameError) {
+      console.error('[Store] Failed to backup corrupted store file, deleting it:', renameError)
+      try {
+        unlinkSync(dataFile)
+      } catch (deleteError) {
+        console.error('[Store] Failed to delete corrupted store file:', deleteError)
+      }
+    }
   }
 
   /**
@@ -577,7 +603,17 @@ class StoreManager {
     
     this.store!.set('logs', logs)
 
-    this.mainWindow?.webContents.send(IpcChannels.LOGS_NEW_LOG, entry)
+    try {
+      if (
+        this.mainWindow &&
+        !this.mainWindow.isDestroyed() &&
+        !this.mainWindow.webContents.isDestroyed()
+      ) {
+        this.mainWindow.webContents.send(IpcChannels.LOGS_NEW_LOG, entry)
+      }
+    } catch (error) {
+      console.warn('[Store] Failed to push log to renderer:', error)
+    }
 
     return entry
   }

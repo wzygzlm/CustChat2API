@@ -6,7 +6,7 @@ let tray: Tray | null = null
 let isProxyRunning = false
 
 function loadAppIcon(): nativeImage {
-  const iconPath = join(__dirname, '../../build/icon.png')
+  const iconPath = resolveTrayIconPath()
   
   try {
     let icon = nativeImage.createFromPath(iconPath)
@@ -49,7 +49,7 @@ function createFallbackIcon(): nativeImage {
 }
 
 function createRunningIcon(): nativeImage {
-  const iconPath = join(__dirname, '../../build/icon.png')
+  const iconPath = resolveTrayIconPath()
   
   try {
     let icon = nativeImage.createFromPath(iconPath)
@@ -64,6 +64,14 @@ function createRunningIcon(): nativeImage {
   }
   
   return createFallbackRunningIcon()
+}
+
+function resolveTrayIconPath(): string {
+  const iconName = process.platform === 'win32' ? 'icon.ico' : 'icon.png'
+  if (app.isPackaged) {
+    return join(process.resourcesPath, 'build', iconName)
+  }
+  return join(__dirname, '../../build', iconName)
 }
 
 function createFallbackRunningIcon(): nativeImage {
@@ -97,8 +105,12 @@ export function createTray(mainWindow: BrowserWindow | null): Tray {
   }
 
   const icon = loadAppIcon()
-
-  tray = new Tray(icon)
+  try {
+    tray = new Tray(icon)
+  } catch (error) {
+    console.error('[Tray] Failed to create tray with primary icon, fallback to empty icon:', error)
+    tray = new Tray(nativeImage.createEmpty())
+  }
 
   const contextMenu = buildContextMenu(mainWindow)
   tray.setToolTip('Chat2API')

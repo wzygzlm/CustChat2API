@@ -90,9 +90,33 @@ export const useSettingsStore = create<SettingsState>()(
         }
       },
       minimizeToTray: true,
-      setMinimizeToTray: (enabled) => set({ minimizeToTray: enabled }),
+      setMinimizeToTray: async (enabled) => {
+        set({
+          minimizeToTray: enabled,
+          closeBehavior: enabled ? 'minimize' : 'close',
+        })
+        try {
+          await window.electronAPI.config.update({ minimizeToTray: enabled })
+        } catch (error) {
+          console.error('Failed to update minimizeToTray:', error)
+        }
+      },
       closeBehavior: 'minimize',
-      setCloseBehavior: (behavior) => set({ closeBehavior: behavior }),
+      setCloseBehavior: async (behavior) => {
+        const currentMinimizeToTray = get().minimizeToTray
+        const minimizeToTray = behavior === 'minimize'
+          ? true
+          : behavior === 'close'
+            ? false
+            : currentMinimizeToTray
+
+        set({ closeBehavior: behavior, minimizeToTray })
+        try {
+          await window.electronAPI.config.update({ minimizeToTray })
+        } catch (error) {
+          console.error('Failed to update closeBehavior:', error)
+        }
+      },
       enableNotifications: true,
       setEnableNotifications: (enabled) => set({ enableNotifications: enabled }),
       logLevel: 'info',
@@ -129,6 +153,8 @@ export const useSettingsStore = create<SettingsState>()(
             autoStart: config.autoStart,
             autoStartProxy: config.autoStartProxy,
             oauthProxyMode: config.oauthProxyMode || 'system',
+            minimizeToTray: config.minimizeToTray,
+            closeBehavior: config.minimizeToTray ? 'minimize' : 'close',
           })
         } catch (error) {
           console.error('Failed to fetch config:', error)
