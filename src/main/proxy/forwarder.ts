@@ -39,6 +39,108 @@ export class RequestForwarder {
     maxContentLength: Infinity,
   })
 
+  private truncate(value: string, maxLen: number = 1200): string {
+    if (value.length <= maxLen) {
+      return value
+    }
+    return `${value.slice(0, maxLen)}...<truncated ${value.length - maxLen} chars>`
+  }
+
+  private logInboundToolResults(
+    request: ChatCompletionRequest,
+    context: ProxyContext,
+    provider: Provider,
+    account: Account
+  ): void {
+    const rawTools = (request as any).tools
+    const hasToolsField = Object.prototype.hasOwnProperty.call(request as any, 'tools')
+    const toolsType = Array.isArray(rawTools) ? 'array' : typeof rawTools
+    const toolsCount = Array.isArray(rawTools) ? rawTools.length : 0
+    storeManager.addLog(
+      'info',
+      `[ToolFlow] Inbound tools metadata hasToolsField=${String(hasToolsField)} toolsType=${toolsType} toolsCount=${toolsCount}`,
+      {
+      requestId: context.requestId,
+      providerId: provider.id,
+      accountId: account.id,
+      data: {
+        model: request.model,
+        actualModel: context.actualModel,
+        hasToolsField,
+        toolsType,
+        toolsCount,
+      },
+    })
+
+    const toolMessages = (request.messages || []).filter((m: any) => m?.role === 'tool')
+    if (toolMessages.length === 0) {
+      return
+    }
+
+    storeManager.addLog('info', `[ToolFlow] Received tool results from client count=${toolMessages.length}`, {
+      requestId: context.requestId,
+      providerId: provider.id,
+      accountId: account.id,
+      data: {
+        model: request.model,
+        actualModel: context.actualModel,
+        count: toolMessages.length,
+        toolCallIds: toolMessages.map((m: any) => m?.tool_call_id).filter(Boolean),
+        contentPreview: this.truncate(
+          toolMessages
+            .map((m: any) => (typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content ?? '')))
+            .join('\n---\n'),
+          1200
+        ),
+      },
+    })
+  }
+
+  private logOutboundToolResults(
+    provider: Provider,
+    account: Account,
+    model: string,
+    messages: any[]
+  ): void {
+    const toolMessages = (messages || []).filter((m: any) => m?.role === 'tool')
+    if (toolMessages.length === 0) {
+      return
+    }
+
+    storeManager.addLog('info', `[ToolFlow] Forwarding tool results to upstream count=${toolMessages.length}`, {
+      providerId: provider.id,
+      accountId: account.id,
+      data: {
+        model,
+        count: toolMessages.length,
+        toolCallIds: toolMessages.map((m: any) => m?.tool_call_id).filter(Boolean),
+        contentPreview: this.truncate(
+          toolMessages
+            .map((m: any) => (typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content ?? '')))
+            .join('\n---\n'),
+          1200
+        ),
+      },
+    })
+  }
+
+  private logToolRouting(provider: Provider, toolResultsCount: number): void {
+    if (toolResultsCount === 0) {
+      return
+    }
+
+    let branch = 'generic'
+    if (DeepSeekAdapter.isDeepSeekProvider(provider)) branch = 'deepseek'
+    else if (GLMAdapter.isGLMProvider(provider)) branch = 'glm'
+    else if (KimiAdapter.isKimiProvider(provider)) branch = 'kimi'
+    else if (QwenAdapter.isQwenProvider(provider)) branch = 'qwen'
+    else if (QwenAiAdapter.isQwenAiProvider(provider)) branch = 'qwen-ai'
+    else if (ZaiAdapter.isZaiProvider(provider)) branch = 'zai'
+    else if (MiniMaxAdapter.isMiniMaxProvider(provider)) branch = 'minimax'
+
+    storeManager.addLog('info', `[ToolFlow] Routing tool results provider=${provider.id} branch=${branch} count=${toolResultsCount}`)
+  }
+
   /**
    * Transform request for prompt-based tool calling
    * For models that don't support native function calling
@@ -90,7 +192,18 @@ export class RequestForwarder {
     if (!hasToolUse(content)) {
       return null
     }
-    return parseToolUse(content)
+    const parsed = parseToolUse(content)
+    storeManager.addLog('info', '[ToolFlow] Model requested tool calls', {
+      data: {
+        count: parsed.length,
+        tools: parsed.map(tc => ({
+          id: tc.id,
+          name: tc.function?.name,
+          argumentsPreview: this.truncate(tc.function?.arguments || '', 400),
+        })),
+      },
+    })
+    return parsed
   }
 
   /**
@@ -149,6 +262,9 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     const startTime = Date.now()
+    this.logInboundToolResults(request, context, provider, account)
+    const inboundToolResultCount = (request.messages || []).filter((m: any) => m?.role === 'tool').length
+    this.logToolRouting(provider, inboundToolResultCount)
 
     // Check if it is a DeepSeek provider, use dedicated adapter
     if (DeepSeekAdapter.isDeepSeekProvider(provider)) {
@@ -190,6 +306,7 @@ export class RequestForwarder {
       const url = this.buildUrl(provider, chatPath)
       const headers = this.buildHeaders(provider, account)
       const body = this.buildRequestBody(request, actualModel, account)
+      this.logOutboundToolResults(provider, account, actualModel, body.messages as any[])
 
       const axiosConfig: AxiosRequestConfig = {
         method: 'POST',
@@ -409,6 +526,7 @@ export class RequestForwarder {
         messages: transformed.messages,
         tools: transformed.tools,
       }
+      this.logOutboundToolResults(provider, account, actualModel, transformedRequest.messages as any[])
 
       const adapter = new GLMAdapter(provider, account)
       
@@ -541,6 +659,7 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     try {
       const transformed = this.transformRequestForPromptToolUse(request)
+      this.logOutboundToolResults(provider, account, actualModel, transformed.messages as any[])
       
       const adapter = new KimiAdapter(provider, account)
       
@@ -662,6 +781,7 @@ export class RequestForwarder {
         messages: transformed.messages,
         tools: transformed.tools,
       }
+      this.logOutboundToolResults(provider, account, actualModel, transformedRequest.messages as any[])
 
       const adapter = new QwenAdapter(provider, account)
       
@@ -778,6 +898,7 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     try {
       const transformed = this.transformRequestForPromptToolUse(request)
+      this.logOutboundToolResults(provider, account, actualModel, transformed.messages as any[])
       
       const adapter = new QwenAiAdapter(provider, account)
       
@@ -897,6 +1018,7 @@ export class RequestForwarder {
     console.log('[forwardZai] provider.modelMappings:', provider.modelMappings)
     try {
       const transformed = this.transformRequestForPromptToolUse(request)
+      this.logOutboundToolResults(provider, account, actualModel, transformed.messages as any[])
       
       const adapter = new ZaiAdapter(provider, account)
       
@@ -949,7 +1071,8 @@ export class RequestForwarder {
           }
         : undefined
 
-      const handler = new ZaiStreamHandler(actualModel, deleteChatCallback)
+      const hasToolsInRequest = Array.isArray((request as any).tools) && (request as any).tools.length > 0
+      const handler = new ZaiStreamHandler(actualModel, deleteChatCallback, hasToolsInRequest)
       handler.setChatId(chatId)
       
       if (request.stream !== false) {
@@ -1000,7 +1123,7 @@ export class RequestForwarder {
         sessionManager.updateProviderSessionId(sessionContext.sessionId, chatId, assistantMsgId)
       }
 
-      if (request.tools && request.tools.length > 0 && !isNativeFunctionCallingModel(request.model)) {
+      if (hasToolsInRequest && !isNativeFunctionCallingModel(request.model)) {
         const content = result?.choices?.[0]?.message?.content || ''
         const toolCalls = this.parseToolCallsFromContent(content)
         
@@ -1046,6 +1169,7 @@ export class RequestForwarder {
     console.log('[forwardMiniMax] provider.modelMappings:', provider.modelMappings)
     try {
       const transformed = this.transformRequestForPromptToolUse(request)
+      this.logOutboundToolResults(provider, account, actualModel, transformed.messages as any[])
       
       const adapter = new MiniMaxAdapter(provider, account)
       

@@ -32,8 +32,16 @@ const FAKE_HEADERS = {
 }
 
 interface ZaiMessage {
-  role: 'user' | 'assistant' | 'system'
-  content: string | any[]
+  role: 'user' | 'assistant' | 'system' | 'tool'
+  content: string | any[] | null
+  tool_call_id?: string
+  tool_calls?: Array<{
+    id?: string
+    function?: {
+      name?: string
+      arguments?: string
+    }
+  }>
 }
 
 interface ChatCompletionRequest {
@@ -101,6 +109,76 @@ export class ZaiAdapter {
       }
     }
     return ''
+  }
+
+  private stringifyContent(content: ZaiMessage['content']): string {
+    if (content == null) return ''
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+      return content
+        .map((part: any) => {
+          if (typeof part === 'string') return part
+          if (!part || typeof part !== 'object') return String(part ?? '')
+          if (part.type === 'text' && typeof part.text === 'string') return part.text
+          return JSON.stringify(part)
+        })
+        .filter(Boolean)
+        .join('\n')
+    }
+    if (typeof content === 'object') return JSON.stringify(content)
+    return String(content)
+  }
+
+  private escapeXml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+  }
+
+  private normalizeMessages(messages: ZaiMessage[]): ZaiMessage[] {
+    const toolNameByCallId = new Map<string, string>()
+    const normalized: ZaiMessage[] = []
+
+    for (const msg of messages) {
+      if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+        const toolUseBlocks: string[] = []
+        for (const tc of msg.tool_calls) {
+          const callId = tc?.id || ''
+          const toolName = tc?.function?.name || 'tool'
+          const args = tc?.function?.arguments || '{}'
+          if (callId) {
+            toolNameByCallId.set(callId, toolName)
+          }
+          toolUseBlocks.push(
+            `<tool_use>\n<name>${this.escapeXml(toolName)}</name>\n<arguments>${this.escapeXml(args)}</arguments>\n</tool_use>`
+          )
+        }
+        normalized.push({
+          ...msg,
+          content: toolUseBlocks.join('\n'),
+          tool_calls: undefined,
+        })
+        continue
+      }
+
+      if (msg.role === 'tool') {
+        const toolName = (msg.tool_call_id && toolNameByCallId.get(msg.tool_call_id)) || 'tool'
+        const resultText = this.stringifyContent(msg.content)
+        normalized.push({
+          role: 'user',
+          content: `<tool_use_result>\n<name>${this.escapeXml(toolName)}</name>\n<result>${this.escapeXml(resultText)}</result>\n</tool_use_result>`,
+        })
+        continue
+      }
+
+      normalized.push({
+        ...msg,
+        content: this.stringifyContent(msg.content),
+      })
+    }
+
+    return normalized
   }
 
   private extractUserIDFromToken(token: string): string {
@@ -293,11 +371,14 @@ export class ZaiAdapter {
     
     console.log('[Z.ai] Original model:', request.model, '-> Mapped model:', mappedModel)
     
+    // Normalize tool-call related history so Z.ai can consume tool results correctly
+    const normalizedMessages = this.normalizeMessages(request.messages)
+
     // Extract system message and merge with user message
     let systemContent = ''
-    let processedMessages = []
+    let processedMessages: ZaiMessage[] = []
     
-    for (const msg of request.messages) {
+    for (const msg of normalizedMessages) {
       if (msg.role === 'system') {
         systemContent += (systemContent ? '\n\n' : '') + (typeof msg.content === 'string' ? msg.content : '')
       } else {
@@ -495,11 +576,13 @@ export class ZaiStreamHandler {
   private onEnd?: (chatId: string) => void
   private content: string = ''
   private toolCallsSent: boolean = false
+  private enableToolCalls: boolean
 
-  constructor(model: string, onEnd?: (chatId: string) => void) {
+  constructor(model: string, onEnd?: (chatId: string) => void, enableToolCalls: boolean = true) {
     this.model = model
     this.created = Math.floor(Date.now() / 1000)
     this.onEnd = onEnd
+    this.enableToolCalls = enableToolCalls
   }
 
   setChatId(chatId: string) {
@@ -610,7 +693,7 @@ export class ZaiStreamHandler {
             console.log('[Z.ai] Stream finished, content length:', this.content.length)
             
             // Check for tool calls before sending stop
-            if (hasToolUse(this.content)) {
+            if (this.enableToolCalls && hasToolUse(this.content)) {
               console.log('[Z.ai] Found tool_use in stream, sending tool_calls')
               this.sendToolCalls(transStream)
               return
