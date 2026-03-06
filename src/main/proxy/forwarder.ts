@@ -39,13 +39,6 @@ export class RequestForwarder {
     maxContentLength: Infinity,
   })
 
-  private truncate(value: string, maxLen: number = 1200): string {
-    if (value.length <= maxLen) {
-      return value
-    }
-    return `${value.slice(0, maxLen)}...<truncated ${value.length - maxLen} chars>`
-  }
-
   private logInboundToolResults(
     request: ChatCompletionRequest,
     context: ProxyContext,
@@ -59,18 +52,7 @@ export class RequestForwarder {
     storeManager.addLog(
       'info',
       `[ToolFlow] Inbound tools metadata hasToolsField=${String(hasToolsField)} toolsType=${toolsType} toolsCount=${toolsCount}`,
-      {
-      requestId: context.requestId,
-      providerId: provider.id,
-      accountId: account.id,
-      data: {
-        model: request.model,
-        actualModel: context.actualModel,
-        hasToolsField,
-        toolsType,
-        toolsCount,
-      },
-    })
+      { requestId: context.requestId, providerId: provider.id, accountId: account.id })
 
     const toolMessages = (request.messages || []).filter((m: any) => m?.role === 'tool')
     if (toolMessages.length === 0) {
@@ -81,18 +63,6 @@ export class RequestForwarder {
       requestId: context.requestId,
       providerId: provider.id,
       accountId: account.id,
-      data: {
-        model: request.model,
-        actualModel: context.actualModel,
-        count: toolMessages.length,
-        toolCallIds: toolMessages.map((m: any) => m?.tool_call_id).filter(Boolean),
-        contentPreview: this.truncate(
-          toolMessages
-            .map((m: any) => (typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content ?? '')))
-            .join('\n---\n'),
-          1200
-        ),
-      },
     })
   }
 
@@ -110,17 +80,6 @@ export class RequestForwarder {
     storeManager.addLog('info', `[ToolFlow] Forwarding tool results to upstream count=${toolMessages.length}`, {
       providerId: provider.id,
       accountId: account.id,
-      data: {
-        model,
-        count: toolMessages.length,
-        toolCallIds: toolMessages.map((m: any) => m?.tool_call_id).filter(Boolean),
-        contentPreview: this.truncate(
-          toolMessages
-            .map((m: any) => (typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content ?? '')))
-            .join('\n---\n'),
-          1200
-        ),
-      },
     })
   }
 
@@ -193,16 +152,7 @@ export class RequestForwarder {
       return null
     }
     const parsed = parseToolUse(content)
-    storeManager.addLog('info', '[ToolFlow] Model requested tool calls', {
-      data: {
-        count: parsed.length,
-        tools: parsed.map(tc => ({
-          id: tc.id,
-          name: tc.function?.name,
-          argumentsPreview: this.truncate(tc.function?.arguments || '', 400),
-        })),
-      },
-    })
+    storeManager.addLog('info', `[ToolFlow] Model requested tool calls count=${parsed.length}`)
     return parsed
   }
 
@@ -378,12 +328,19 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(request)
       const transformedRequest = {
         ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
+        messages: request.messages,
+        tools: request.tools,
       }
+      this.logOutboundToolResults(provider, account, actualModel, transformedRequest.messages as any[])
+      const toolsCount = Array.isArray(request.tools) ? request.tools.length : 0
+      const messageCount = Array.isArray(request.messages) ? request.messages.length : 0
+      storeManager.addLog(
+        'info',
+        `[ToolFlow][DeepSeek] Outbound request snapshot stream=${!!request.stream} tools=${toolsCount} messages=${messageCount}`,
+        { providerId: provider.id, accountId: account.id }
+      )
 
       const adapter = new DeepSeekAdapter(provider, account)
       
@@ -405,6 +362,8 @@ export class RequestForwarder {
         messages: transformedRequest.messages as any,
         stream: transformedRequest.stream,
         temperature: transformedRequest.temperature,
+        tools: transformedRequest.tools as any,
+        tool_choice: (transformedRequest as any).tool_choice,
         sessionId: sessionContext.providerSessionId,
         parentMessageId: sessionContext.parentMessageId,
       })

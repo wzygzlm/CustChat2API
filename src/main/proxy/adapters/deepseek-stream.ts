@@ -5,6 +5,7 @@
 
 import { PassThrough } from 'stream'
 import { parseToolCallsFromText } from '../utils/toolParser'
+import { storeManager } from '../../store/store'
 import { 
   createToolCallState, 
   processStreamContent, 
@@ -34,6 +35,9 @@ export class DeepSeekStreamHandler {
   private created: number
   private onEnd?: () => void
   private toolCallState: ToolCallState
+  private logToolFlow(message: string): void {
+    storeManager.addLog('info', `[ToolFlow][DeepSeek] ${message}`)
+  }
 
   constructor(model: string, sessionId: string, onEnd?: () => void) {
     this.model = model
@@ -97,7 +101,10 @@ export class DeepSeekStreamHandler {
         }
 
         const parsed = this.parseSSE(data)
-        if (!parsed) continue
+        if (!parsed) {
+          this.logToolFlow('Failed to parse SSE JSON event')
+          continue
+        }
 
         this.processChunk(parsed, transStream, isThinkingModel, isSilentModel, isFoldModel, isSearchSilentModel)
       }
@@ -122,12 +129,14 @@ export class DeepSeekStreamHandler {
     isFoldModel: boolean,
     isSearchSilentModel: boolean
   ): void {
+    let responseObject: any | null = null
     if (chunk.response_message_id && !this.messageId) {
       this.messageId = chunk.response_message_id
       console.log('[DeepSeek] Stream received messageId:', chunk.response_message_id)
     }
 
     if (chunk.v && typeof chunk.v === 'object' && chunk.v.response) {
+      responseObject = chunk.v.response
       this.currentPath = chunk.v.response.thinking_enabled ? 'thinking' : 'content'
     } else if (chunk.p === 'response/fragments') {
       this.currentPath = 'content'
@@ -161,7 +170,11 @@ export class DeepSeekStreamHandler {
     }
 
     let content = ''
-    if (typeof chunk.v === 'string') {
+    if (responseObject && Array.isArray(responseObject.fragments)) {
+      content = responseObject.fragments
+        .map((f: any) => (typeof f?.content === 'string' ? f.content : ''))
+        .join('')
+    } else if (typeof chunk.v === 'string') {
       content = chunk.v
     } else if (Array.isArray(chunk.v)) {
       content = chunk.v
@@ -180,6 +193,10 @@ export class DeepSeekStreamHandler {
     const processedContent = isSearchSilentModel
       ? cleanedValue.replace(/\[citation:(\d+)\]/g, '')
       : cleanedValue.replace(/\[citation:(\d+)\]/g, '[$1]')
+
+    if (/(?:\[function_calls\]|function_calls\]|\[call:|<tool_use>)/.test(processedContent)) {
+      this.logToolFlow('Raw model fragment may contain tool marker')
+    }
 
     // Process tool call interception for content
     if (this.currentPath === 'content' || !this.currentPath) {
@@ -201,6 +218,11 @@ export class DeepSeekStreamHandler {
       const hasToolCalls = outputChunks.some(chunk => 
         chunk.choices?.[0]?.delta?.tool_calls
       )
+      if (hasToolCalls) {
+        const parsedToolCallsCount = outputChunks
+          .flatMap((c: any) => c?.choices?.[0]?.delta?.tool_calls || []).length
+        this.logToolFlow(`Parsed tool calls from stream fragment count=${parsedToolCallsCount}`)
+      }
       // For content path, streamToolHandler is the single output path.                                                                                                                                         
       // Returning here avoids duplicate writes and prevents leaking partially buffered tool markup.                                                                                                            
       if (hasToolCalls || outputChunks.length > 0 || !shouldFlush || this.toolCallState.hasEmittedToolCall) {                                                                                                   
@@ -244,6 +266,10 @@ export class DeepSeekStreamHandler {
     // Flush tool call buffer before finishing
     const baseChunk = createBaseChunk(`${this.sessionId}@${this.messageId}`, this.model, this.created)
     const flushChunks = flushToolCallBuffer(this.toolCallState, baseChunk)
+    const flushToolCalls = flushChunks.flatMap((c: any) => c?.choices?.[0]?.delta?.tool_calls || [])
+    if (flushToolCalls.length > 0) {
+      this.logToolFlow(`Parsed tool calls while flushing stream buffer count=${flushToolCalls.length}`)
+    }
     for (const outChunk of flushChunks) {
       transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
     }
@@ -266,6 +292,7 @@ export class DeepSeekStreamHandler {
 
     // Determine finish_reason based on whether we had tool calls
     const finishReason = this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
+    this.logToolFlow(`Stream finished finishReason=${finishReason} hasEmittedToolCall=${this.toolCallState.hasEmittedToolCall}`)
 
     transStream.write(this.createChunk({}, finishReason))
     transStream.write('data: [DONE]\n\n')
@@ -309,6 +336,20 @@ export class DeepSeekStreamHandler {
               currentPath = 'content'
             }
 
+            if (parsed.v && typeof parsed.v === 'object' && parsed.v.response && Array.isArray(parsed.v.response.fragments)) {
+              const fragmentText = parsed.v.response.fragments
+                .map((f: any) => (typeof f?.content === 'string' ? f.content : ''))
+                .join('')
+              if (fragmentText) {
+                const cleanedValue = fragmentText.replace(/FINISHED/g, '')
+                if (currentPath === 'thinking') {
+                  accumulatedThinkingContent += cleanedValue
+                } else {
+                  accumulatedContent += cleanedValue
+                }
+              }
+            }
+
             if (typeof parsed.v === 'object' && Array.isArray(parsed.v)) {
               parsed.v.forEach((e: any) => {
                 if (e.accumulated_token_usage && typeof e.v === 'number') {
@@ -334,7 +375,7 @@ export class DeepSeekStreamHandler {
               }
             }
           } catch {
-            // Ignore parse errors
+            this.logToolFlow('Failed to parse SSE JSON event')
           }
         }
       })
@@ -346,6 +387,7 @@ export class DeepSeekStreamHandler {
 
         // Parse tool calls from accumulated content
         const { content: cleanContent, toolCalls } = parseToolCallsFromText(accumulatedContent)
+        this.logToolFlow(`Non-stream parse summary parsedToolCalls=${toolCalls.length}`)
 
         const message: any = {
           role: 'assistant',
