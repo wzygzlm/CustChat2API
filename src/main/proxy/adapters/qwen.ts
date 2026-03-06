@@ -41,8 +41,16 @@ const DEFAULT_HEADERS = {
 }
 
 interface QwenMessage {
-  role: 'user' | 'assistant' | 'system'
-  content: string | any[]
+  role: 'user' | 'assistant' | 'system' | 'tool'
+  content: string | any[] | null
+  tool_call_id?: string
+  tool_calls?: Array<{
+    id?: string
+    function?: {
+      name?: string
+      arguments?: string
+    }
+  }>
 }
 
 interface ChatCompletionRequest {
@@ -110,6 +118,48 @@ export class QwenAdapter {
     return model
   }
 
+  private stringifyContent(content: QwenMessage['content']): string {
+    if (content == null) return ''
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+      return content
+        .map((part: any) => {
+          if (typeof part === 'string') return part
+          if (!part || typeof part !== 'object') return String(part ?? '')
+          if (part.type === 'text' && typeof part.text === 'string') return part.text
+          return JSON.stringify(part)
+        })
+        .filter(Boolean)
+        .join('\n')
+    }
+    if (typeof content === 'object') return JSON.stringify(content)
+    return String(content)
+  }
+
+  private normalizeMessages(messages: QwenMessage[]): QwenMessage[] {
+    return messages.map((msg) => {
+      if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+        const toolCallsText = msg.tool_calls
+          .map((tc) => `[call:${tc?.function?.name || 'tool'}]${tc?.function?.arguments || '{}'}[/call]`)
+          .join('\n')
+        return { ...msg, content: `[function_calls]\n${toolCallsText}\n[/function_calls]`, tool_calls: undefined }
+      }
+
+      if (msg.role === 'tool') {
+        const normalizedToolContent = this.stringifyContent(msg.content)
+        return {
+          role: 'user',
+          content: `[TOOL_RESULT for ${msg.tool_call_id || 'tool_call'}] ${normalizedToolContent}`,
+        }
+      }
+
+      return {
+        ...msg,
+        content: this.stringifyContent(msg.content),
+      }
+    })
+  }
+
   async chatCompletion(request: ChatCompletionRequest): Promise<{
     response: AxiosResponse
     sessionId: string
@@ -126,22 +176,35 @@ export class QwenAdapter {
     
     console.log('[Qwen] Using model:', actualModel)
 
+    const normalizedMessages = this.normalizeMessages(request.messages)
+
     // Find system message and user message
     let systemPrompt = ''
     let userContent = ''
     
-    for (const msg of request.messages) {
+    for (const msg of normalizedMessages) {
       if (msg.role === 'system') {
-        systemPrompt = extractTextContent(msg.content)
+        systemPrompt = this.stringifyContent(msg.content)
       } else if (msg.role === 'user') {
-        userContent = extractTextContent(msg.content)
+        userContent = this.stringifyContent(msg.content)
       }
     }
 
-    // If system prompt exists, prepend it to user content
-    const finalContent = systemPrompt 
-      ? `${systemPrompt}\n\nUser: ${userContent}`
-      : userContent
+    const hasToolContext = normalizedMessages.some(
+      (msg) =>
+        msg.role === 'tool' ||
+        (msg.role === 'assistant' && Array.isArray((msg as any).tool_calls) && (msg as any).tool_calls.length > 0) ||
+        (typeof msg.content === 'string' && (msg.content.includes('[function_calls]') || msg.content.includes('[TOOL_RESULT for ')))
+    )
+
+    // Keep previous concise behavior for normal chat; switch to full conversation only when tool context is present.
+    const finalContent = hasToolContext
+      ? normalizedMessages
+          .map((msg) => `${msg.role === 'system' ? 'system' : msg.role === 'assistant' ? 'assistant' : 'user'}: ${this.stringifyContent(msg.content)}`)
+          .join('\n\n')
+      : systemPrompt
+        ? `${systemPrompt}\n\nUser: ${userContent}`
+        : userContent
 
     const timestamp = Date.now()
     const nonce = generateNonce()
