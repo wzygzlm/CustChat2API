@@ -33,7 +33,8 @@ export function processStreamContent(
   modelType: string = 'default'
 ): { chunks: any[], shouldFlush: boolean } {
   const result: any[] = []
-  const marker = '[function_calls]'
+  const isXmlToolProtocol = modelType === 'minimax' || modelType === 'xml-tool-use'
+  const marker = isXmlToolProtocol ? '<tool_use>' : '[function_calls]'
 
   if (!content) {
     return { chunks: result, shouldFlush: false }
@@ -43,7 +44,7 @@ export function processStreamContent(
 
   // If we are not buffering, check if we should start
   if (!state.isBufferingToolCall) {
-    const markerIdx = state.contentBuffer.indexOf('[function_calls]')
+    const markerIdx = state.contentBuffer.indexOf(marker)
 
     if (markerIdx !== -1) {
       // We found the full marker!
@@ -66,8 +67,9 @@ export function processStreamContent(
     } else {
       // Check if the buffer ends with a partial marker
       let foundPartial = false
+      const markerHead = marker[0]
       for (let i = 0; i < state.contentBuffer.length; i++) {
-        if (state.contentBuffer[i] === '[') {
+        if (state.contentBuffer[i] === markerHead) {
           const potentialMarker = state.contentBuffer.substring(i)
           if (marker.startsWith(potentialMarker)) {
             state.isBufferingToolCall = true
@@ -153,12 +155,14 @@ export function processStreamContent(
       state.hasEmittedToolCall = true
 
       // Check if we still have [function_calls] in the buffer
-      if (state.contentBuffer.includes('[/function_calls]')) {
+      if (!isXmlToolProtocol && state.contentBuffer.includes('[/function_calls]')) {
         state.isBufferingToolCall = false
         // Remove the block markers
         state.contentBuffer = state.contentBuffer.replace(/\[\/?function_calls\]/g, '').trim()
+      } else if (isXmlToolProtocol && state.contentBuffer.includes('</tool_use>')) {
+        state.isBufferingToolCall = state.contentBuffer.includes('<tool_use>')
       } else {
-        state.isBufferingToolCall = state.contentBuffer.includes('[function_calls]')
+        state.isBufferingToolCall = state.contentBuffer.includes(marker)
       }
 
       // If we emitted a tool call, we should NOT send any remaining text content

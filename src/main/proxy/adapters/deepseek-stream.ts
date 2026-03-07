@@ -38,7 +38,6 @@ export class DeepSeekStreamHandler {
   private logToolFlow(message: string): void {
     storeManager.addLog('info', `[ToolFlow][DeepSeek] ${message}`)
   }
-
   constructor(model: string, sessionId: string, onEnd?: () => void) {
     this.model = model
     this.sessionId = sessionId
@@ -194,10 +193,6 @@ export class DeepSeekStreamHandler {
       ? cleanedValue.replace(/\[citation:(\d+)\]/g, '')
       : cleanedValue.replace(/\[citation:(\d+)\]/g, '[$1]')
 
-    if (/(?:\[function_calls\]|function_calls\]|\[call:|<tool_use>)/.test(processedContent)) {
-      this.logToolFlow('Raw model fragment may contain tool marker')
-    }
-
     // Process tool call interception for content
     if (this.currentPath === 'content' || !this.currentPath) {
       const baseChunk = createBaseChunk(`${this.sessionId}@${this.messageId}`, this.model, this.created)
@@ -205,7 +200,8 @@ export class DeepSeekStreamHandler {
         processedContent, 
         this.toolCallState, 
         baseChunk, 
-        this.isFirstChunk
+        this.isFirstChunk,
+        'xml-tool-use'
       )
 
       for (const outChunk of outputChunks) {
@@ -265,7 +261,7 @@ export class DeepSeekStreamHandler {
   private handleDone(transStream: PassThrough, isFoldModel: boolean, isSearchSilentModel: boolean): void {
     // Flush tool call buffer before finishing
     const baseChunk = createBaseChunk(`${this.sessionId}@${this.messageId}`, this.model, this.created)
-    const flushChunks = flushToolCallBuffer(this.toolCallState, baseChunk)
+    const flushChunks = flushToolCallBuffer(this.toolCallState, baseChunk, 'xml-tool-use')
     const flushToolCalls = flushChunks.flatMap((c: any) => c?.choices?.[0]?.delta?.tool_calls || [])
     if (flushToolCalls.length > 0) {
       this.logToolFlow(`Parsed tool calls while flushing stream buffer count=${flushToolCalls.length}`)
@@ -386,7 +382,7 @@ export class DeepSeekStreamHandler {
         console.log('[DeepSeek] Non-stream finished, messageId:', messageId, 'content length:', accumulatedContent.length)
 
         // Parse tool calls from accumulated content
-        const { content: cleanContent, toolCalls } = parseToolCallsFromText(accumulatedContent)
+        const { content: cleanContent, toolCalls } = parseToolCallsFromText(accumulatedContent, 'xml-tool-use')
         this.logToolFlow(`Non-stream parse summary parsedToolCalls=${toolCalls.length}`)
 
         const message: any = {

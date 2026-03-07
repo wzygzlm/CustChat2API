@@ -31,7 +31,7 @@ export function parseToolCallsFromText(text: string, modelType: string = 'defaul
   let cleanContent = text
 
   // Handle MiniMax XML format first
-  if (modelType === 'minimax' && text.includes('<tool_use>')) {
+  if ((modelType === 'minimax' || modelType === 'xml-tool-use') && text.includes('<tool_use>')) {
     // Try multiple XML patterns for MiniMax's inconsistent format
     const patterns = [
       // Standard format

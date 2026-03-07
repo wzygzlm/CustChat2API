@@ -7,7 +7,6 @@ import axios, { AxiosResponse } from 'axios'
 import { getDeepSeekHash } from '../../lib/challenge'
 import { Account, Provider } from '../store/types'
 import { storeManager } from '../store/store'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT } from '../utils/tools'
 
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api'
 
@@ -47,7 +46,7 @@ interface ChallengeResponse {
 
 interface DeepSeekMessage {
   role: 'user' | 'assistant' | 'system' | 'tool'
-  content: string | null
+  content: string | any[] | null
   tool_call_id?: string
   tool_calls?: any[]
 }
@@ -283,36 +282,83 @@ export class DeepSeekAdapter {
     })).toString('base64')
   }
 
-  private messagesToPrompt(messages: DeepSeekMessage[]): string {
-    const processedMessages = messages.map(message => {
-      let text: string
 
-      // Handle tool calls in assistant message
-      if (message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0) {
-        const toolCallsText = message.tool_calls.map(tc => {
-          return `<tool_calling>
-<name>${tc.function.name}</name>
-<arguments>${tc.function.arguments}</arguments>
-</tool_calling>`
-        }).join('\n')
-        text = toolCallsText
+  private stringifyContent(content: DeepSeekMessage['content']): string {
+    if (content == null) return ''
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+      return content
+        .map((part: any) => {
+          if (typeof part === 'string') return part
+          if (!part || typeof part !== 'object') return String(part ?? '')
+          if (part.type === 'text' && typeof part.text === 'string') return part.text
+          return JSON.stringify(part)
+        })
+        .filter(Boolean)
+        .join('\n')
+    }
+    if (typeof content === 'object') return JSON.stringify(content)
+    return String(content)
+  }
+
+  private escapeXml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+  }
+
+  private normalizeMessages(messages: DeepSeekMessage[]): DeepSeekMessage[] {
+    const toolNameByCallId = new Map<string, string>()
+    const normalized: DeepSeekMessage[] = []
+
+    for (const msg of messages) {
+      if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+        const toolUseBlocks: string[] = []
+        for (const tc of msg.tool_calls) {
+          const callId = tc?.id || ''
+          const toolName = tc?.function?.name || 'tool'
+          const args = tc?.function?.arguments || '{}'
+          if (callId) {
+            toolNameByCallId.set(callId, toolName)
+          }
+          toolUseBlocks.push(
+            `<tool_use>\n<name>${this.escapeXml(toolName)}</name>\n<arguments>${this.escapeXml(args)}</arguments>\n</tool_use>`
+          )
+        }
+        normalized.push({
+          ...msg,
+          content: toolUseBlocks.join('\n'),
+          tool_calls: undefined,
+        })
+        continue
       }
-      // Handle tool response message
-      else if (message.role === 'tool' && message.tool_call_id) {
-        text = `<tool_response tool_call_id="${message.tool_call_id}">
-${message.content || ''}
-</tool_response>`
+
+      if (msg.role === 'tool') {
+        const toolName = (msg.tool_call_id && toolNameByCallId.get(msg.tool_call_id)) || 'tool'
+        const resultText = this.stringifyContent(msg.content)
+        normalized.push({
+          role: 'user',
+          content: `<tool_use_result>\n<name>${this.escapeXml(toolName)}</name>\n<result>${this.escapeXml(resultText)}</result>\n</tool_use_result>`,
+        })
+        continue
       }
-      else if (Array.isArray(message.content)) {
-        const texts = message.content
-          .filter((item: any) => item.type === 'text')
-          .map((item: any) => item.text)
-        text = texts.join('\n')
-      } else {
-        text = String(message.content || '')
-      }
-      return { role: message.role, text }
-    })
+
+      normalized.push({
+        ...msg,
+        content: this.stringifyContent(msg.content),
+      })
+    }
+
+    return normalized
+  }
+
+  private messagesToPrompt(messages: DeepSeekMessage[]): string {
+    const normalizedMessages = this.normalizeMessages(messages)
+    const processedMessages = normalizedMessages.map((message) => ({
+      role: message.role,
+      text: this.stringifyContent(message.content),
+    }))
 
     if (processedMessages.length === 0) return ''
 
@@ -330,23 +376,26 @@ ${message.content || ''}
     }
     mergedBlocks.push(currentBlock)
 
+    const userTag = '<\uFF5CUser\uFF5C>'
+    const assistantTag = '<\uFF5CAssistant\uFF5C>'
+    const assistantEndTag = '<\uFF5Cend of sentence\uFF5C>'
+
     return mergedBlocks
       .map((block, index) => {
         if (block.role === 'assistant') {
-          return `<｜Assistant｜>${block.text}<｜end of sentence｜>`
+          return `${assistantTag}${block.text}${assistantEndTag}`
         }
         if (block.role === 'user' || block.role === 'system') {
-          return index > 0 ? `<｜User｜>${block.text}` : block.text
+          return index > 0 ? `${userTag}${block.text}` : block.text
         }
         if (block.role === 'tool') {
-          return `<｜User｜>${block.text}`
+          return `${userTag}${block.text}`
         }
         return block.text
       })
       .join('')
       .replace(/!\[.+\]\(.+\)/g, '')
   }
-
   async chatCompletion(request: ChatCompletionRequest): Promise<{ response: AxiosResponse; sessionId: string; messageId: string }> {
     const token = await this.acquireToken()
     
@@ -362,29 +411,7 @@ ${message.content || ''}
 
     const messages = [...request.messages]
 
-    if (request.tools && request.tools.length > 0) {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'user') {
-          const currentContent = messages[i].content
-          messages[i] = {
-            ...messages[i],
-            content: (currentContent || '') + TOOL_WRAP_HINT
-          }
-          break
-        }
-      }
-    }
-
-    let prompt = this.messagesToPrompt(messages)
-
-    if (request.tools && request.tools.length > 0) {
-      const toolsPrompt = toolsToSystemPrompt(request.tools, true)
-      if (prompt.startsWith('<｜User｜>')) {
-        prompt = prompt.replace('<｜User｜>', `<｜User｜>${toolsPrompt}\n\n`)
-      } else {
-        prompt = `${toolsPrompt}\n\n${prompt}`
-      }
-    }
+    const prompt = this.messagesToPrompt(messages)
 
     let searchEnabled = false
     let thinkingEnabled = false
@@ -450,3 +477,4 @@ ${message.content || ''}
 export const deepSeekAdapter = {
   DeepSeekAdapter,
 }
+

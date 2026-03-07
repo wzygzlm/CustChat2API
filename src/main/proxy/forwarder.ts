@@ -100,6 +100,45 @@ export class RequestForwarder {
     storeManager.addLog('info', `[ToolFlow] Routing tool results provider=${provider.id} branch=${branch} count=${toolResultsCount}`)
   }
 
+  private extractMessageText(content: any): string {
+    if (typeof content === 'string') {
+      return content
+    }
+    if (Array.isArray(content)) {
+      return content
+        .map((part: any) => (part && part.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+        .join('\n')
+    }
+    return ''
+  }
+
+  private hasSessionResetCommand(messages: any[]): boolean {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]
+      if (msg?.role !== 'user') continue
+      const text = this.extractMessageText(msg.content)
+      return /\/(?:new|reset|reseet)\b/i.test(text)
+    }
+    return false
+  }
+
+  private async resetDeepSeekActiveSessions(adapter: DeepSeekAdapter, providerId: string, accountId: string): Promise<void> {
+    const sessions = sessionManager
+      .getSessionsByAccount(accountId)
+      .filter((s) => s.providerId === providerId && s.status === 'active')
+
+    for (const s of sessions) {
+      if (s.providerSessionId) {
+        try {
+          await adapter.deleteSession(s.providerSessionId)
+        } catch (err) {
+          console.warn('[DeepSeek] Failed to delete upstream session during /new|/reset:', err)
+        }
+      }
+      sessionManager.deleteSession(s.id)
+    }
+  }
+
   /**
    * Transform request for prompt-based tool calling
    * For models that don't support native function calling
@@ -328,14 +367,15 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
+      const transformed = this.transformRequestForPromptToolUse(request)
       const transformedRequest = {
         ...request,
-        messages: request.messages,
-        tools: request.tools,
+        messages: transformed.messages,
+        tools: transformed.tools,
       }
       this.logOutboundToolResults(provider, account, actualModel, transformedRequest.messages as any[])
-      const toolsCount = Array.isArray(request.tools) ? request.tools.length : 0
-      const messageCount = Array.isArray(request.messages) ? request.messages.length : 0
+      const toolsCount = Array.isArray(transformedRequest.tools) ? transformedRequest.tools.length : 0
+      const messageCount = Array.isArray(transformedRequest.messages) ? transformedRequest.messages.length : 0
       storeManager.addLog(
         'info',
         `[ToolFlow][DeepSeek] Outbound request snapshot stream=${!!request.stream} tools=${toolsCount} messages=${messageCount}`,
@@ -343,6 +383,11 @@ export class RequestForwarder {
       )
 
       const adapter = new DeepSeekAdapter(provider, account)
+      const shouldResetSession = this.hasSessionResetCommand((request.messages || []) as any[])
+      if (shouldResetSession) {
+        await this.resetDeepSeekActiveSessions(adapter, provider.id, account.id)
+        storeManager.addLog('info', '[ToolFlow][DeepSeek] Detected /new or /reset, force creating a new session')
+      }
       
       const sessionContext = sessionManager.getOrCreateSession({
         providerId: provider.id,
@@ -410,7 +455,7 @@ export class RequestForwarder {
         const transformedStream = await handler.handleStream(response.data)
         
         transformedStream.on('end', () => {
-          const msgId = handler.getMessageId()
+          const msgId = handler.getMessageId() || sessionContext.parentMessageId
           if (sessionContext.sessionId && sessionManager.isMultiTurnEnabled()) {
             sessionManager.updateProviderSessionId(sessionContext.sessionId, sessionId, msgId)
           }
@@ -431,7 +476,7 @@ export class RequestForwarder {
 
       const result = await handler.handleNonStream(response.data)
       
-      const msgId = handler.getMessageId()
+      const msgId = handler.getMessageId() || sessionContext.parentMessageId
       if (sessionContext.sessionId && sessionManager.isMultiTurnEnabled()) {
         sessionManager.updateProviderSessionId(sessionContext.sessionId, sessionId, msgId)
       }
