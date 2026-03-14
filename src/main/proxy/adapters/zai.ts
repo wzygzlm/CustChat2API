@@ -111,6 +111,29 @@ export class ZaiAdapter {
     return ''
   }
 
+  private extractFirstUserMessage(messages: ZaiMessage[]): string {
+    for (const message of messages) {
+      if (message.role !== 'user') continue
+      const content = message.content
+      if (typeof content === 'string') {
+        return content
+      }
+      if (Array.isArray(content)) {
+        const textParts: string[] = []
+        for (const part of content) {
+          if (typeof part === 'object' && part !== null && part.type === 'text' && part.text) {
+            textParts.push(part.text)
+          }
+        }
+        if (textParts.length > 0) {
+          return textParts.join('\n')
+        }
+      }
+      return ''
+    }
+    return ''
+  }
+
   private stringifyContent(content: ZaiMessage['content']): string {
     if (content == null) return ''
     if (typeof content === 'string') return content
@@ -405,6 +428,7 @@ export class ZaiAdapter {
     }
     
     const signaturePrompt = this.extractLastUserMessage(processedMessages)
+    const initialChatMessage = this.extractFirstUserMessage(processedMessages) || signaturePrompt
     
     let chatId = request.chatId
     let messageId = uuid()
@@ -412,7 +436,7 @@ export class ZaiAdapter {
     let parentMessageId = request.parentMessageId || null
     
     if (!chatId) {
-      const createResult = await this.createChat(mappedModel, signaturePrompt)
+      const createResult = await this.createChat(mappedModel, initialChatMessage)
       chatId = createResult.chatId
       messageId = createResult.messageId
       isNewChat = true

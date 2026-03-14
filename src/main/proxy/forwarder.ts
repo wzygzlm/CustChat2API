@@ -139,6 +139,23 @@ export class RequestForwarder {
     }
   }
 
+  private async resetZaiActiveSessions(adapter: ZaiAdapter, providerId: string, accountId: string): Promise<void> {
+    const sessions = sessionManager
+      .getSessionsByAccount(accountId)
+      .filter((s) => s.providerId === providerId && s.status === 'active')
+
+    for (const s of sessions) {
+      if (s.providerSessionId) {
+        try {
+          await adapter.deleteChat(s.providerSessionId)
+        } catch (err) {
+          console.warn('[Z.ai] Failed to delete upstream chat during /new|/reset:', err)
+        }
+      }
+      sessionManager.deleteSession(s.id)
+    }
+  }
+
   /**
    * Transform request for prompt-based tool calling
    * For models that don't support native function calling
@@ -1025,6 +1042,11 @@ export class RequestForwarder {
       this.logOutboundToolResults(provider, account, actualModel, transformed.messages as any[])
       
       const adapter = new ZaiAdapter(provider, account)
+      const shouldResetSession = this.hasSessionResetCommand((request.messages || []) as any[])
+      if (shouldResetSession) {
+        await this.resetZaiActiveSessions(adapter, provider.id, account.id)
+        storeManager.addLog('info', '[ToolFlow][Zai] Detected /new or /reset, force creating a new session')
+      }
       
       const sessionContext = sessionManager.getOrCreateSession({
         providerId: provider.id,
