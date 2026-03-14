@@ -37,6 +37,7 @@ function getClientIP(ctx: Context): string {
  * Handle Chat Completions Request
  */
 router.post('/completions', async (ctx: Context) => {
+  storeManager.refreshFromDisk()
   const startTime = Date.now()
   const requestId = generateRequestId()
   const clientIP = getClientIP(ctx)

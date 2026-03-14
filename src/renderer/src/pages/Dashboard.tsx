@@ -40,8 +40,11 @@ export function Dashboard() {
 
   useEffect(() => {
     const interval = setInterval(() => {
+      if (document.visibilityState !== 'visible') {
+        return
+      }
       useDashboardStore.getState().refreshData()
-    }, 60000)
+    }, 120000)
     
     return () => clearInterval(interval)
   }, [])

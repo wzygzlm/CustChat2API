@@ -23,7 +23,8 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: resolve(__dirname, 'src/main/index.ts')
+          index: resolve(__dirname, 'src/main/index.ts'),
+          service: resolve(__dirname, 'src/main/service/index.ts')
         },
         output: {
           format: 'cjs'

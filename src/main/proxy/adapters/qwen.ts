@@ -174,8 +174,6 @@ export class QwenAdapter {
     const sessionId = request.session_id || uuid(false)
     const actualModel = this.mapModel(request.model)
     
-    console.log('[Qwen] Using model:', actualModel)
-
     const normalizedMessages = this.normalizeMessages(request.messages)
 
     // Find system message and user message
@@ -239,8 +237,6 @@ export class QwenAdapter {
     const queryString = `biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen&ut=${uuid(false)}&nonce=${nonce}&timestamp=${timestamp}`
     const url = `${QWEN_API_BASE}/api/v2/chat?${queryString}`
 
-    console.log('[Qwen] Sending request to /api/v2/chat...')
-
     const response = await this.axiosInstance.post(url, requestBody, {
       headers: {
         ...DEFAULT_HEADERS,
@@ -251,9 +247,6 @@ export class QwenAdapter {
       timeout: 120000,
       decompress: false,
     })
-
-    console.log('[Qwen] Response status:', response.status)
-    console.log('[Qwen] Response headers:', JSON.stringify(response.headers, null, 2))
 
     return { response, sessionId, reqId }
   }
@@ -299,7 +292,6 @@ export class QwenAdapter {
         return false
       }
 
-      console.log('[Qwen] Session deleted successfully:', sessionId)
       return true
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
@@ -383,10 +375,7 @@ export class QwenStreamHandler {
   handleStream(stream: any, response?: AxiosResponse): PassThrough {
     const transStream = new PassThrough()
 
-    console.log('[Qwen] Starting stream handler...')
-    
     const contentEncoding = response?.headers?.['content-encoding']
-    console.log('[Qwen] Content-Encoding:', contentEncoding)
 
     transStream.write(
       `data: ${JSON.stringify({
@@ -423,14 +412,6 @@ export class QwenStreamHandler {
         if (eventData && eventData !== '[DONE]') {
           try {
             const result = JSON.parse(eventData)
-            console.log('[Qwen] Parsed event:', eventType, 'data keys:', Object.keys(result))
-            if (result.data?.messages) {
-              console.log('[Qwen] Messages count:', result.data.messages.length)
-              for (const msg of result.data.messages) {
-                console.log('[Qwen] Message:', msg.mime_type, 'status:', msg.status, 'content length:', msg.content?.length || 0)
-              }
-            }
-
             if (result.communication) {
               if (!this.sessionId && result.communication.sessionid) {
                 this.sessionId = result.communication.sessionid
@@ -442,14 +423,11 @@ export class QwenStreamHandler {
 
             if (result.data?.messages) {
               for (const msg of result.data.messages) {
-                console.log('[Qwen] Message detail:', JSON.stringify(msg).substring(0, 500))
                 if ((msg.mime_type === 'text/plain' || msg.mime_type === 'multi_load/iframe') && msg.content) {
                   const newContent = msg.content
-                  console.log('[Qwen] newContent.length:', newContent.length, 'this.content.length:', this.content.length)
                   if (newContent.length > this.content.length) {
                     const chunk = newContent.substring(this.content.length)
                     this.content = newContent
-                    console.log('[Qwen] Writing chunk, length:', chunk.length)
 
                     transStream.write(
                       `data: ${JSON.stringify({
@@ -460,9 +438,6 @@ export class QwenStreamHandler {
                         created: this.created,
                       })}\n\n`
                     )
-                    console.log('[Qwen] Chunk written to stream')
-                  } else {
-                    console.log('[Qwen] Skipping - no new content')
                   }
                 }
 
@@ -470,11 +445,8 @@ export class QwenStreamHandler {
                   // 只有当 multi_load/iframe 消息完成时才发送 stop
                   if (msg.mime_type === 'multi_load/iframe' && !this.stopSent) {
                     this.stopSent = true
-                    console.log('[Qwen] Sending stop for multi_load/iframe, content so far:', this.content.length)
-                    
                     // Check for tool calls before sending stop
                     if (hasToolUse(this.content)) {
-                      console.log('[Qwen] Found tool_use in stream, sending tool_calls')
                       this.sendToolCalls(transStream)
                       return
                     }
@@ -515,13 +487,11 @@ export class QwenStreamHandler {
         }
 
         if (eventType === 'complete') {
-          console.log('[Qwen] Received complete event')
           if (!transStream.closed && !this.stopSent) {
             this.stopSent = true
             
             // Check for tool calls before sending stop
             if (hasToolUse(this.content)) {
-              console.log('[Qwen] Found tool_use in complete event, sending tool_calls')
               this.sendToolCalls(transStream)
               return
             }
@@ -545,16 +515,12 @@ export class QwenStreamHandler {
     let decompressStream: any = stream
     
     if (contentEncoding === 'gzip') {
-      console.log('[Qwen] Decompressing gzip stream...')
       decompressStream = stream.pipe(createGunzip())
     } else if (contentEncoding === 'deflate') {
-      console.log('[Qwen] Decompressing deflate stream...')
       decompressStream = stream.pipe(createInflate())
     } else if (contentEncoding === 'br') {
-      console.log('[Qwen] Decompressing brotli stream...')
       decompressStream = stream.pipe(createBrotliDecompress())
     } else if (contentEncoding === 'zstd') {
-      console.log('[Qwen] Decompressing zstd stream...')
       const chunks: Buffer[] = []
       stream.on('data', (chunk: Buffer) => chunks.push(chunk))
       stream.once('end', () => {
@@ -589,7 +555,6 @@ export class QwenStreamHandler {
       transStream.end('data: [DONE]\n\n')
     })
     decompressStream.once('close', () => {
-      console.log('[Qwen] Stream closed')
       processBuffer()
       transStream.end('data: [DONE]\n\n')
     })
@@ -598,8 +563,6 @@ export class QwenStreamHandler {
   }
 
   async handleNonStream(stream: any, response?: AxiosResponse): Promise<any> {
-    console.log('[Qwen] Starting non-stream handler...')
-
     return new Promise((resolve, reject) => {
       const data = {
         id: '',
@@ -643,8 +606,6 @@ export class QwenStreamHandler {
           if (eventData && eventData !== '[DONE]') {
             try {
               const result = JSON.parse(eventData)
-              console.log('[Qwen] Non-stream parsed event:', eventType, 'data keys:', Object.keys(result))
-
               if (result.communication) {
                 if (!data.id && result.communication.sessionid) {
                   data.id = result.communication.sessionid
@@ -657,7 +618,6 @@ export class QwenStreamHandler {
                   // Handle multi_load/iframe content (actual response content)
                   if (msg.mime_type === 'multi_load/iframe' && msg.content) {
                     contentAccumulator = msg.content
-                    console.log('[Qwen] Non-stream multi_load/iframe content length:', contentAccumulator.length)
                   }
                   
                   // Also handle text/plain content
@@ -669,7 +629,6 @@ export class QwenStreamHandler {
 
                   if (msg.status === 'complete' || msg.status === 'finished') {
                     if (msg.mime_type === 'multi_load/iframe') {
-                      console.log('[Qwen] Non-stream finished, content length:', contentAccumulator.length)
                       data.choices[0].message.content = contentAccumulator
                       this.content = contentAccumulator
                       this.onEnd?.(this.sessionId)
@@ -686,7 +645,6 @@ export class QwenStreamHandler {
           }
 
           if (eventType === 'complete' && !resolved) {
-            console.log('[Qwen] Non-stream complete event, content length:', contentAccumulator.length)
             data.choices[0].message.content = contentAccumulator
             this.content = contentAccumulator
             resolved = true
@@ -700,16 +658,12 @@ export class QwenStreamHandler {
       
       const contentEncoding = response?.headers?.['content-encoding']?.toLowerCase()
       if (contentEncoding === 'gzip') {
-        console.log('[Qwen] Decompressing gzip stream...')
         decompressStream = stream.pipe(createGunzip())
       } else if (contentEncoding === 'deflate') {
-        console.log('[Qwen] Decompressing deflate stream...')
         decompressStream = stream.pipe(createInflate())
       } else if (contentEncoding === 'br') {
-        console.log('[Qwen] Decompressing brotli stream...')
         decompressStream = stream.pipe(createBrotliDecompress())
       } else if (contentEncoding === 'zstd') {
-        console.log('[Qwen] Decompressing zstd stream...')
         const chunks: Buffer[] = []
         stream.on('data', (chunk: Buffer) => chunks.push(chunk))
         stream.once('end', () => {
@@ -721,7 +675,6 @@ export class QwenStreamHandler {
               const decompressedStr = Buffer.from(decompressed).toString('utf8')
               buffer = decompressedStr
               processBuffer()
-              console.log('[Qwen] Zstd non-stream finished, content length:', contentAccumulator.length)
               data.choices[0].message.content = contentAccumulator
               this.content = contentAccumulator
               resolve(data)
@@ -747,7 +700,6 @@ export class QwenStreamHandler {
         reject(err)
       })
       decompressStream.once('close', () => {
-        console.log('[Qwen] Non-stream closed, content length:', contentAccumulator.length)
         if (!resolved) {
           processBuffer()
           data.choices[0].message.content = contentAccumulator
@@ -756,7 +708,6 @@ export class QwenStreamHandler {
         }
       })
       decompressStream.once('end', () => {
-        console.log('[Qwen] Non-stream ended, content length:', contentAccumulator.length)
         if (!resolved) {
           processBuffer()
           data.choices[0].message.content = contentAccumulator

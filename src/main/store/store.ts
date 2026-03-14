@@ -4,7 +4,7 @@
  * Uses Electron's safeStorage API for sensitive data encryption
  */
 
-import { safeStorage, BrowserWindow } from 'electron'
+import type { BrowserWindow } from 'electron'
 import { homedir } from 'os'
 import { join } from 'path'
 import { existsSync, renameSync, unlinkSync } from 'fs'
@@ -29,6 +29,34 @@ import { IpcChannels } from '../ipc/channels'
 // Dynamically import electron-store (ESM module)
 let Store: any = null
 
+interface SafeStorageLike {
+  isEncryptionAvailable(): boolean
+  encryptString(text: string): Buffer
+  decryptString(buffer: Buffer): string
+}
+
+let cachedSafeStorage: SafeStorageLike | null | undefined
+
+function getSafeStorage(): SafeStorageLike | null {
+  if (cachedSafeStorage !== undefined) {
+    return cachedSafeStorage
+  }
+
+  try {
+    const electronModule = require('electron')
+    const safeStorage = electronModule?.safeStorage
+    if (safeStorage && typeof safeStorage.isEncryptionAvailable === 'function') {
+      cachedSafeStorage = safeStorage as SafeStorageLike
+      return cachedSafeStorage
+    }
+  } catch {
+    // Running outside Electron main runtime, e.g. service child process.
+  }
+
+  cachedSafeStorage = null
+  return cachedSafeStorage
+}
+
 /**
  * Storage Instance Type Definition
  */
@@ -42,6 +70,11 @@ class StoreManager {
   private store: StoreType | null = null
   private isInitialized: boolean = false
   private mainWindow: BrowserWindow | null = null
+  private lastReloadAt = 0
+  private logsCache: LogEntry[] = []
+  private pendingLogEntries: LogEntry[] = []
+  private logPersistTimer: NodeJS.Timeout | null = null
+  private logIpcTimer: NodeJS.Timeout | null = null
 
   setMainWindow(window: BrowserWindow | null): void {
     this.mainWindow = window
@@ -76,6 +109,8 @@ class StoreManager {
     }
 
     await this.initializeDefaultProviders()
+    this.logsCache = this.store!.get('logs') || []
+    this.lastReloadAt = Date.now()
     this.isInitialized = true
   }
 
@@ -175,8 +210,13 @@ class StoreManager {
       return p
     })
     
-    // Always update storage to ensure built-in provider configuration is up-to-date
-    this.store?.set('providers', updatedProviders)
+    const hasChanged = JSON.stringify(validProviders) !== JSON.stringify(updatedProviders)
+
+    // Avoid unnecessary writes. This is especially important when the proxy
+    // runtime is running in a separate process and only needs a consistent read.
+    if (hasChanged) {
+      this.store?.set('providers', updatedProviders)
+    }
   }
 
   /**
@@ -229,18 +269,12 @@ class StoreManager {
    */
   encryptData(data: string): string {
     try {
-      console.log('[Store] encryptData input length:', data.length, 'content:', data.substring(0, 20) + '...')
-      if (safeStorage.isEncryptionAvailable()) {
+      const safeStorage = getSafeStorage()
+      if (safeStorage?.isEncryptionAvailable()) {
         // Create new Buffer to store encryption result
         const encrypted = Buffer.from(safeStorage.encryptString(data))
         const result = encrypted.toString('base64')
-        console.log('[Store] encryptData output length:', result.length, 'content:', result.substring(0, 20) + '...')
-        // Verify encryption is correct
-        const decrypted = safeStorage.decryptString(encrypted)
-        console.log('[Store] encryptData verify decryption:', decrypted.substring(0, 20) + '...', 'match:', decrypted === data)
         return result
-      } else {
-        console.log('[Store] Encryption unavailable, returning original data')
       }
     } catch (error) {
       console.error('Failed to encrypt data:', error)
@@ -255,7 +289,8 @@ class StoreManager {
    */
   decryptData(encryptedData: string): string {
     try {
-      if (safeStorage.isEncryptionAvailable()) {
+      const safeStorage = getSafeStorage()
+      if (safeStorage?.isEncryptionAvailable()) {
         const buffer = Buffer.from(encryptedData, 'base64')
         return safeStorage.decryptString(buffer)
       }
@@ -583,8 +618,6 @@ class StoreManager {
     }
   ): LogEntry {
     this.ensureInitialized()
-    const logs = this.store!.get('logs') || []
-    
     const entry: LogEntry = {
       id: this.generateId(),
       timestamp: Date.now(),
@@ -592,30 +625,36 @@ class StoreManager {
       message,
       ...data,
     }
-    
-    logs.push(entry)
-    
+
+    this.logsCache.push(entry)
+
     const config = this.getConfig()
     const maxLogs = config.logRetentionDays * 1000
-    if (logs.length > maxLogs) {
-      logs.splice(0, logs.length - maxLogs)
+    if (this.logsCache.length > maxLogs) {
+      this.logsCache.splice(0, this.logsCache.length - maxLogs)
     }
-    
-    this.store!.set('logs', logs)
 
-    try {
-      if (
-        this.mainWindow &&
-        !this.mainWindow.isDestroyed() &&
-        !this.mainWindow.webContents.isDestroyed()
-      ) {
-        this.mainWindow.webContents.send(IpcChannels.LOGS_NEW_LOG, entry)
-      }
-    } catch (error) {
-      console.warn('[Store] Failed to push log to renderer:', error)
-    }
+    this.pendingLogEntries.push(entry)
+    this.schedulePersistLogs()
+    this.scheduleLogIpcFlush()
 
     return entry
+  }
+
+  refreshFromDisk(maxAgeMs: number = 2000): void {
+    if (!this.isInitialized) {
+      return
+    }
+
+    const now = Date.now()
+    if (maxAgeMs > 0 && now - this.lastReloadAt < maxAgeMs) {
+      return
+    }
+
+    const storagePath = this.getStoragePath()
+    this.store = this.createStore(storagePath)
+    this.logsCache = this.store.get('logs') || []
+    this.lastReloadAt = now
   }
 
   /**
@@ -625,7 +664,7 @@ class StoreManager {
    */
   getLogs(limit?: number, level?: LogLevel): LogEntry[] {
     this.ensureInitialized()
-    let logs = this.store!.get('logs') || []
+    let logs = [...this.logsCache]
     
     if (level) {
       logs = logs.filter((l) => l.level === level)
@@ -643,6 +682,16 @@ class StoreManager {
    */
   clearLogs(): void {
     this.ensureInitialized()
+    this.logsCache = []
+    this.pendingLogEntries = []
+    if (this.logPersistTimer) {
+      clearTimeout(this.logPersistTimer)
+      this.logPersistTimer = null
+    }
+    if (this.logIpcTimer) {
+      clearTimeout(this.logIpcTimer)
+      this.logIpcTimer = null
+    }
     this.store!.set('logs', [])
   }
 
@@ -651,7 +700,7 @@ class StoreManager {
    */
   getLogStats(): { total: number; info: number; warn: number; error: number; debug: number } {
     this.ensureInitialized()
-    const logs = this.store!.get('logs') || []
+    const logs = this.logsCache
     
     return {
       total: logs.length,
@@ -667,7 +716,7 @@ class StoreManager {
    */
   getLogTrend(days: number = 7): { date: string; total: number; info: number; warn: number; error: number }[] {
     this.ensureInitialized()
-    const logs = this.store!.get('logs') || []
+    const logs = this.logsCache
     const now = Date.now()
     const dayMs = 24 * 60 * 60 * 1000
     const trends: { date: string; total: number; info: number; warn: number; error: number }[] = []
@@ -699,7 +748,7 @@ class StoreManager {
    */
   getAccountLogTrend(accountId: string, days: number = 7): { date: string; total: number; info: number; warn: number; error: number }[] {
     this.ensureInitialized()
-    const logs = this.store!.get('logs') || []
+    const logs = this.logsCache
     const accountLogs = logs.filter((l: LogEntry) => l.accountId === accountId && l.requestId)
     const now = Date.now()
     const dayMs = 24 * 60 * 60 * 1000
@@ -735,7 +784,7 @@ class StoreManager {
    */
   exportLogs(format: 'json' | 'txt' = 'json'): string {
     this.ensureInitialized()
-    const logs = this.store!.get('logs') || []
+    const logs = this.logsCache
 
     if (format === 'json') {
       return JSON.stringify(logs, null, 2)
@@ -770,8 +819,7 @@ class StoreManager {
    */
   getLogById(id: string): LogEntry | undefined {
     this.ensureInitialized()
-    const logs = this.store!.get('logs') || []
-    return logs.find((l: LogEntry) => l.id === id)
+    return this.logsCache.find((l: LogEntry) => l.id === id)
   }
 
   /**
@@ -780,11 +828,50 @@ class StoreManager {
   cleanExpiredLogs(): void {
     this.ensureInitialized()
     const config = this.getConfig()
-    const logs = this.store!.get('logs') || []
     const cutoff = Date.now() - config.logRetentionDays * 24 * 60 * 60 * 1000
-    
-    const filtered = logs.filter((l) => l.timestamp >= cutoff)
-    this.store!.set('logs', filtered)
+
+    this.logsCache = this.logsCache.filter((l) => l.timestamp >= cutoff)
+    this.store!.set('logs', this.logsCache)
+  }
+
+  private schedulePersistLogs(): void {
+    if (this.logPersistTimer) {
+      return
+    }
+
+    this.logPersistTimer = setTimeout(() => {
+      this.logPersistTimer = null
+      if (!this.store) {
+        return
+      }
+      this.store.set('logs', this.logsCache)
+    }, 500)
+  }
+
+  private scheduleLogIpcFlush(): void {
+    if (this.logIpcTimer) {
+      return
+    }
+
+    this.logIpcTimer = setTimeout(() => {
+      this.logIpcTimer = null
+      const entries = this.pendingLogEntries.splice(0)
+      if (entries.length === 0) {
+        return
+      }
+
+      try {
+        if (
+          this.mainWindow &&
+          !this.mainWindow.isDestroyed() &&
+          !this.mainWindow.webContents.isDestroyed()
+        ) {
+          this.mainWindow.webContents.send(IpcChannels.LOGS_NEW_LOG, entries)
+        }
+      } catch (error) {
+        console.warn('[Store] Failed to push logs to renderer:', error)
+      }
+    }, 150)
   }
 
   // ==================== System Prompts Operations ====================

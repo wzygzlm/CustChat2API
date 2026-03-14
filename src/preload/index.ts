@@ -252,8 +252,10 @@ const logsAPI = {
   getById: (id: string): Promise<LogEntry | undefined> => 
     ipcRenderer.invoke(IpcChannels.LOGS_GET_BY_ID, id),
   
-  onNewLog: (callback: (log: LogEntry) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, log: LogEntry) => callback(log)
+  onNewLog: (callback: (logs: LogEntry[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: LogEntry | LogEntry[]) => {
+      callback(Array.isArray(payload) ? payload : [payload])
+    }
     ipcRenderer.on(IpcChannels.LOGS_NEW_LOG, handler)
     return () => ipcRenderer.removeListener(IpcChannels.LOGS_NEW_LOG, handler)
   },

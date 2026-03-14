@@ -15,6 +15,7 @@ const router = new Router({ prefix: '/v1' })
  * Get all available models
  */
 router.get('/models', async (ctx: Context) => {
+  storeManager.refreshFromDisk()
   const providers = storeManager.getProviders().filter(p => p.enabled)
   const models: ModelInfo[] = []
   const addedModels = new Set<string>()
@@ -55,6 +56,7 @@ router.get('/models', async (ctx: Context) => {
  * Get specified model info
  */
 router.get('/models/:model', async (ctx: Context) => {
+  storeManager.refreshFromDisk()
   const modelId = ctx.params.model
 
   const providers = storeManager.getProviders().filter(p => p.enabled)

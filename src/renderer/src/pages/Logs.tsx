@@ -64,8 +64,8 @@ export default function LogsPage() {
   useEffect(() => {
     if (!window.electronAPI?.logs?.onNewLog) return
 
-    const unsubscribe = window.electronAPI.logs.onNewLog((newLog: LogEntry) => {
-      logsRef.current = [...logsRef.current.slice(-999), newLog]
+    const unsubscribe = window.electronAPI.logs.onNewLog((incomingLogs: LogEntry[]) => {
+      logsRef.current = [...logsRef.current, ...incomingLogs].slice(-1000)
       setLogs([...logsRef.current])
     })
 

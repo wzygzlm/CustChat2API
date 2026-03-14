@@ -195,7 +195,7 @@ interface LogsAPI {
   clear: () => Promise<void>
   export: (format?: 'json' | 'txt') => Promise<string>
   getById: (id: string) => Promise<LogEntry | undefined>
-  onNewLog: (callback: (log: LogEntry) => void) => () => void
+  onNewLog: (callback: (logs: LogEntry[]) => void) => () => void
 }
 
 interface AppAPI {

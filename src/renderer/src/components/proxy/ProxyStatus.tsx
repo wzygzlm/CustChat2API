@@ -43,12 +43,17 @@ export function ProxyStatus({ onStatusChange }: ProxyStatusProps) {
   useEffect(() => {
     fetchProxyStatus()
     fetchProxyStatistics()
-    
-    const statusInterval = setInterval(() => {
+
+    const refresh = () => {
+      if (document.visibilityState !== 'visible') {
+        return
+      }
       fetchProxyStatus()
       fetchProxyStatistics()
-    }, 5000)
-    
+    }
+
+    const statusInterval = setInterval(refresh, 10000)
+
     return () => {
       clearInterval(statusInterval)
     }

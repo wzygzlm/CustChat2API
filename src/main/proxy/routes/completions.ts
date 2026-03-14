@@ -51,6 +51,7 @@ function promptToMessages(prompt: string | string[]): Array<{ role: string; cont
  * Handle Completions request
  */
 router.post('/completions', async (ctx: Context) => {
+  storeManager.refreshFromDisk()
   const startTime = Date.now()
   const requestId = generateRequestId()
 

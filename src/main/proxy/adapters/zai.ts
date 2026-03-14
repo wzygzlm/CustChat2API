@@ -254,8 +254,6 @@ export class ZaiAdapter {
     const timestamp = Math.floor(Date.now() / 1000)
     const messageId = uuid()
     
-    console.log('[Z.ai] Creating chat with model:', model)
-    
     const requestBody = {
       chat: {
         id: '',
@@ -317,7 +315,6 @@ export class ZaiAdapter {
       throw new Error(`Failed to create chat: HTTP ${response.status}`)
     }
 
-    console.log('[Z.ai] Chat created:', response.data.id)
     return { chatId: response.data.id, messageId }
   }
 
@@ -338,7 +335,6 @@ export class ZaiAdapter {
         }
       )
 
-      console.log('[Z.ai] Chat deleted:', chatId, 'Status:', response.status)
       return response.status === 200 || response.status === 204
     } catch (error) {
       console.error('[Z.ai] Failed to delete chat:', error)
@@ -378,8 +374,6 @@ export class ZaiAdapter {
     const token = await this.ensureToken()
     const userId = this.extractUserIDFromToken(token)
     
-    console.log('[Z.ai] chatCompletion called with request.model:', request.model)
-    
     const modelMapping: Record<string, string> = {
       'GLM-5': 'glm-5',
       'GLM-4.7': 'glm-4.7',
@@ -391,8 +385,6 @@ export class ZaiAdapter {
       'glm-4.6': 'glm-4.6v',
     }
     const mappedModel = modelMapping[request.model] || request.model
-    
-    console.log('[Z.ai] Original model:', request.model, '-> Mapped model:', mappedModel)
     
     // Normalize tool-call related history so Z.ai can consume tool results correctly
     const normalizedMessages = this.normalizeMessages(request.messages)
@@ -432,17 +424,12 @@ export class ZaiAdapter {
     
     let chatId = request.chatId
     let messageId = uuid()
-    let isNewChat = false
     let parentMessageId = request.parentMessageId || null
     
     if (!chatId) {
       const createResult = await this.createChat(mappedModel, initialChatMessage)
       chatId = createResult.chatId
       messageId = createResult.messageId
-      isNewChat = true
-    } else {
-      console.log('[Z.ai] Using existing chat:', chatId)
-      console.log('[Z.ai] Parent message ID:', parentMessageId || 'N/A')
     }
     
     const requestId = uuid()
@@ -485,13 +472,6 @@ export class ZaiAdapter {
         tags_generation: true,
       },
     }
-
-    console.log('[Z.ai] Sending chat request...')
-    console.log('[Z.ai] Model:', request.model)
-    console.log('[Z.ai] ChatId:', chatId)
-    console.log('[Z.ai] MessageId (current_user_message_id):', messageId)
-    console.log('[Z.ai] Is new chat:', isNewChat)
-    console.log('[Z.ai] Features:', JSON.stringify(features))
 
     const queryParams = new URLSearchParams({
       timestamp: String(timestamp),
@@ -563,13 +543,7 @@ export class ZaiAdapter {
       }
     )
 
-    console.log('[Z.ai] Response status:', response.status)
     if (response.status !== 200) {
-      console.log('[Z.ai] Request body:', JSON.stringify(requestBody, null, 2))
-      console.log('[Z.ai] Signature:', signature)
-      console.log('[Z.ai] Timestamp:', timestamp)
-      console.log('[Z.ai] RequestId:', requestId)
-      console.log('[Z.ai] UserId:', userId)
       if (response.data && typeof response.data.on === 'function') {
         const chunks: Buffer[] = []
         response.data.on('data', (chunk: Buffer) => chunks.push(chunk))
@@ -578,9 +552,9 @@ export class ZaiAdapter {
           response.data.on('error', () => resolve())
         })
         const errorBody = Buffer.concat(chunks).toString('utf8')
-        console.log('[Z.ai] Error response body:', errorBody)
+        console.error('[Z.ai] Error response body:', errorBody)
       } else if (response.data) {
-        console.log('[Z.ai] Error response data:', JSON.stringify(response.data, null, 2))
+        console.error('[Z.ai] Error response data:', JSON.stringify(response.data, null, 2))
       }
     }
 
@@ -673,8 +647,6 @@ export class ZaiStreamHandler {
   async handleStream(stream: any): Promise<PassThrough> {
     const transStream = new PassThrough()
 
-    console.log('[Z.ai] Starting stream handler...')
-
     transStream.write(
       `data: ${JSON.stringify({
         id: '',
@@ -703,7 +675,6 @@ export class ZaiStreamHandler {
             if (result.message_id || result.id) {
               this.messageId = result.message_id || result.id
             }
-            console.log('[Z.ai] Stream answer, message_id:', this.messageId || 'N/A', 'result.message_id:', result.message_id || 'N/A', 'result.id:', result.id || 'N/A')
             transStream.write(
               `data: ${JSON.stringify({
                 id: this.chatId,
@@ -714,11 +685,8 @@ export class ZaiStreamHandler {
               })}\n\n`
             )
           } else if (result.phase === 'done' && result.done) {
-            console.log('[Z.ai] Stream finished, content length:', this.content.length)
-            
             // Check for tool calls before sending stop
             if (this.enableToolCalls && hasToolUse(this.content)) {
-              console.log('[Z.ai] Found tool_use in stream, sending tool_calls')
               this.sendToolCalls(transStream)
               return
             }
@@ -769,7 +737,6 @@ export class ZaiStreamHandler {
       transStream.end('data: [DONE]\n\n')
     })
     stream.once('close', () => {
-      console.log('[Z.ai] Stream closed')
       transStream.end('data: [DONE]\n\n')
     })
 
@@ -777,8 +744,6 @@ export class ZaiStreamHandler {
   }
 
   async handleNonStream(response: any): Promise<any> {
-    console.log('[Z.ai] Starting non-stream handler...')
-    
     return new Promise((resolve, reject) => {
       const data = {
         id: this.chatId,
@@ -816,13 +781,11 @@ export class ZaiStreamHandler {
                 if (result.message_id || result.id) {
                   this.messageId = result.message_id || result.id
                 }
-                console.log('[Z.ai] Non-stream answer, message_id:', this.messageId || 'N/A', 'result.message_id:', result.message_id || 'N/A', 'result.id:', result.id || 'N/A')
               } else if (result.phase === 'done' && result.done) {
                 // Also check for message_id in the done phase
                 if (result.message_id || result.id) {
                   this.messageId = result.message_id || result.id
                 }
-                console.log('[Z.ai] Non-stream finished, content length:', data.choices[0].message.content.length, 'message_id:', this.messageId || 'N/A')
                 if (result.usage) {
                   data.usage = result.usage
                 }
@@ -885,7 +848,6 @@ export class ZaiStreamHandler {
             data.choices[0].message.content = responseData.choices?.[0]?.message?.content || ''
           }
           
-          console.log('[Z.ai] Non-stream JSON finished, content length:', data.choices[0].message.content.length, 'message_id:', this.messageId || 'N/A')
           resolve(data)
         } catch (err) {
           console.error('[Z.ai] Non-stream JSON parse error:', err)

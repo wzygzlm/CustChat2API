@@ -1035,8 +1035,6 @@ export class RequestForwarder {
     actualModel: string,
     startTime: number
   ): Promise<ForwardResult> {
-    console.log('[forwardZai] actualModel:', actualModel)
-    console.log('[forwardZai] provider.modelMappings:', provider.modelMappings)
     try {
       const transformed = this.transformRequestForPromptToolUse(request)
       this.logOutboundToolResults(provider, account, actualModel, transformed.messages as any[])
@@ -1052,12 +1050,6 @@ export class RequestForwarder {
         providerId: provider.id,
         accountId: account.id,
         model: actualModel,
-      })
-      
-      console.log('[Z.ai] Session context:', {
-        sessionId: sessionContext.sessionId,
-        providerSessionId: sessionContext.providerSessionId,
-        isNew: sessionContext.isNew,
       })
       
       const { response, chatId, userMessageId } = await adapter.chatCompletion({
@@ -1109,7 +1101,6 @@ export class RequestForwarder {
           if (sessionContext.sessionId && sessionManager.isMultiTurnEnabled() && chatId && userMessageId) {
             try {
               const assistantMsgId = await adapter.getLatestMessageId(chatId, userMessageId)
-              console.log('[Z.ai] Got assistant message ID from batch API:', assistantMsgId || 'N/A')
               if (assistantMsgId) {
                 sessionManager.updateProviderSessionId(sessionContext.sessionId, chatId, assistantMsgId)
               }
@@ -1131,15 +1122,12 @@ export class RequestForwarder {
 
       const result = await handler.handleNonStream(response)
       
-      console.log('[Z.ai] Non-stream finished, chatId:', chatId)
-      
       // For Z.ai, we need to call the batch API to get the assistant message ID
       let assistantMsgId: string | undefined
       if (sessionContext.sessionId && sessionManager.isMultiTurnEnabled() && chatId && userMessageId) {
         try {
           const msgId = await adapter.getLatestMessageId(chatId, userMessageId)
           assistantMsgId = msgId || undefined
-          console.log('[Z.ai] Got assistant message ID from batch API:', assistantMsgId || 'N/A')
         } catch (error) {
           console.error('[Z.ai] Failed to get assistant message ID:', error)
         }

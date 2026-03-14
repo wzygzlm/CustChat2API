@@ -2,7 +2,7 @@ import { app, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { createWindow, getMainWindow, loadUrl, loadFile, openDevTools } from './window/manager'
 import { createTray, updateTrayIcon, destroyTray } from './tray'
-import { registerIpcHandlers } from './ipc/handlers'
+import { registerIpcHandlers, shutdownProxyServiceController } from './ipc/handlers'
 
 // Automatically add --no-sandbox flag when running as root user
 if (process.getuid && process.getuid() === 0) {
@@ -103,8 +103,9 @@ async function loadAppContent(mainWindow: BrowserWindow): Promise<void> {
   }
 }
 
-function cleanup(): void {
+async function cleanup(): Promise<void> {
   console.log('Application is exiting, performing cleanup...')
+  await shutdownProxyServiceController()
 }
 
 export function restartApp(): void {
